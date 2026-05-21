@@ -33,9 +33,9 @@ ORANGE = {
 POLICY_ACTION = {
     (0, 0): RIGHT,
     (0, 1): RIGHT,
-    (0, 2): RIGHT,
+    (0, 2): DOWN,
     (0, 3): DOWN,
-    (0, 4): DOWN,
+    (0, 4): UP,
     (1, 0): UP,
     (1, 1): UP,
     (1, 2): RIGHT,
@@ -43,9 +43,9 @@ POLICY_ACTION = {
     (1, 4): DOWN,
     (2, 0): UP,
     (2, 1): LEFT,
-    (2, 2): DOWN,
+    (2, 2): STAY,
     (2, 3): RIGHT,
-    (2, 4): DOWN,
+    (2, 4): RIGHT,
     (3, 0): UP,
     (3, 1): RIGHT,
     (3, 2): STAY,  # 目标格
@@ -67,7 +67,7 @@ def reward(s, a):
     # a == RIGHT, LEFT, DOWN, UP, STAY
     next_s = [s[0] + a[0], s[1] + a[1]]
     if not in_bounds(next_s[0], next_s[1]):
-        return -1, 1, s  # 撞墙：惩罚，留在原状态
+        return -10, 1, s  # 撞墙：惩罚，留在原状态
     if next_s == GOAL:
         return 1, 1, next_s
     if tuple(next_s) in ORANGE:
@@ -149,6 +149,7 @@ def evaluate_policy(gamma=GAMMA, theta=1e-8):
     return v
 
 
+
 def compute_q(v, gamma=GAMMA):
     q = {}
     for i in range(N):
@@ -163,6 +164,135 @@ def compute_q(v, gamma=GAMMA):
 
 
 def value_iteration(gamma=GAMMA, theta=1e-8):
+    """
+    策略迭代（写在 value_iteration 里）：
+    1) 对当前 POLICY_ACTION 做值迭代，直到 V^pi 收敛
+    2) 策略改进：pi(s) <- argmax_a Q(s,a)
+    3) 若策略不变则得到最优 pi* 与 V*
+    """
+    v = [[0.0] * N for _ in range(N)]
+    while True:
+        # 1. 策略评估：固定 pi，迭代 V^pi
+        while True:
+            delta = 0.0
+            v_new = [[0.0] * N for _ in range(N)]
+            for i in range(N):
+                for j in range(N):
+                    s = [i, j]
+                    total = 0.0
+                    for a in ACTIONS:
+                        prob = pi(s, a)
+                        if prob == 0:
+                            continue
+                        r, _, next_s = reward(s, a)
+                        ni, nj = next_s
+                        total += prob * (r + gamma * v[ni][nj])
+                    v_new[i][j] = total
+                    delta = max(delta, abs(v_new[i][j] - v[i][j]))
+            v = v_new
+            if delta < theta:
+                break
+
+        # 2. 策略改进：在 V^pi 上对全部动作贪心
+        policy_stable = True
+        for i in range(N):
+            for j in range(N):
+                key = (i, j)
+                best_q = float("-inf")
+                act = None
+                for a in ACTIONS:
+                    r, _, next_s = reward([i, j], a)
+                    q = r + gamma * v[next_s[0]][next_s[1]]
+                    if q > best_q:
+                        best_q, act = q, a
+                old = POLICY_ACTION.get(key)
+                if old != act:
+                    policy_stable = False
+                POLICY_ACTION[key] = act
+
+        if policy_stable:
+            break
+    return v
+
+
+def policy_iteration(gamma=GAMMA, theta=1e-8):
+    """
+    标准策略迭代：
+    1) 对当前 POLICY_ACTION 做策略评估，直到 V^pi 收敛
+    2) 策略改进：pi(s) <- argmax_a Q(s,a)
+    3) 若策略不变则得到最优 pi* 与 V*
+    """
+    v = [[0.0] * N for _ in range(N)]
+    while True:
+        # 1. 策略评估
+        while True:
+            delta = 0.0
+            v_new = [[0.0] * N for _ in range(N)]
+            for i in range(N):
+                for j in range(N):
+                    s = [i, j]
+                    total = 0.0
+                    for a in ACTIONS:
+                        prob = pi(s, a)
+                        if prob == 0:
+                            continue
+                        r, _, next_s = reward(s, a)
+                        ni, nj = next_s
+                        total += prob * (r + gamma * v[ni][nj])
+                    v_new[i][j] = total
+                    delta = max(delta, abs(v_new[i][j] - v[i][j]))
+            v = v_new
+            if delta < theta:
+                break
+
+        # 2. 策略改进
+        policy_stable = True
+        for i in range(N):
+            for j in range(N):
+                key = (i, j)
+                best_q = float("-inf")
+                act = None
+                for a in ACTIONS:
+                    r, _, next_s = reward([i, j], a)
+                    q = r + gamma * v[next_s[0]][next_s[1]]
+                    if q > best_q:
+                        best_q, act = q, a
+                old = POLICY_ACTION.get(key)
+                if old != act:
+                    policy_stable = False
+                POLICY_ACTION[key] = act
+
+        if policy_stable:
+            break
+    return v
+
+
+def get_trajectory(s, a):
+    arr = []
+    for _ in range(100):
+        r, _, next_s = reward(s, a)
+        ni, nj = next_s
+        arr.append((s[:], a[:], r, [ni, nj]))
+        chosen = POLICY_ACTION.get(tuple(next_s))
+        if chosen is not None:
+            s = [ni, nj]
+            a = chosen
+        else:
+            break
+    return arr
+
+
+def get_rewards(arr, gamma):
+    ret = []
+    t = 0
+    for s, a, r, next_s in reversed(arr):
+        t = t * gamma + r
+        ret.append(t)
+    ret.reverse()
+    return ret
+
+
+def mc_policy_iteration(gamma=GAMMA, theta=1e-8):
     v = [[0.0] * N for _ in range(N)]
     while True:
         delta = 0.0
@@ -170,17 +300,33 @@ def value_iteration(gamma=GAMMA, theta=1e-8):
         for i in range(N):
             for j in range(N):
                 s = [i, j]
-                best = float("-inf")
+                best_g = float("-inf")
+                act = None
                 for a in ACTIONS:
-                    r, _, next_s = reward(s, a)
-                    ni, nj = next_s
-                    best = max(best, r + gamma * v[ni][nj])
-                v_new[i][j] = best
+                    traj = get_trajectory(s, a)
+                    if not traj:
+                        continue
+                    rs = get_rewards(traj, gamma)
+                    g0 = rs[0]  # 从 (s,a) 出发的 MC 回报，估计 Q(s,a)
+                    if g0 > best_g:
+                        best_g = g0
+                        act = a
+                if act is not None:
+                    POLICY_ACTION[tuple(s)] = act
+                    v_new[i][j] = best_g  # V(s) 用最优动作的样本回报，与 MC 一致
+                else:
+                    v_new[i][j] = v[i][j]
                 delta = max(delta, abs(v_new[i][j] - v[i][j]))
+
         v = v_new
         if delta < theta:
             break
+
     return v
+    
+
+
+
 
 
 def greedy_policy_from_v(v, gamma=GAMMA):
@@ -234,14 +380,19 @@ if __name__ == "__main__":
     print("=== 环境2：5x5，目标(4,3)，橙色=惩罚 -1 ===\n")
     print_policy()
 
-    v_exact, _, _ = calc()
-    print_grid_values(v_exact, "\nV^pi（矩阵解析解）:")
+    # v_exact, _, _ = calc()
+    # print_grid_values(v_exact, "\nV^pi（矩阵解析解）:")
 
-    v_iter = evaluate_policy()
-    print_grid_values(v_iter, "\nV^pi（迭代策略评估）:")
+    # v_iter = evaluate_policy()
+    # print_grid_values(v_iter, "\nV^pi（迭代策略评估）:")
 
-    max_diff = max(abs(v_exact[i][j] - v_iter[i][j]) for i in range(N) for j in range(N))
-    print(f"\n两种方法最大误差: {max_diff:.2e}")
+    # max_diff = max(abs(v_exact[i][j] - v_iter[i][j]) for i in range(N) for j in range(N))
+    # print(f"\n两种方法最大误差: {max_diff:.2e}")
 
-    v_star = value_iteration()
+    v_star = mc_policy_iteration()
     print_grid_values(v_star, "\nV*（值迭代，无 pi）:")
+
+
+
+    v_star = policy_iteration()
+    print_grid_values(v_star, "\nV*（policy迭代，无 pi）:")
