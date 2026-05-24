@@ -533,6 +533,246 @@ def qleaning_offpolicy(
 
 
 
+
+def qleaning_offpolicy(
+    env: GridWorldEnv,
+    policy: Policy | None = None,
+    *,
+    epsilon: float = 0.1,
+    gamma: float | None = None,
+    max_steps: int = 100,
+    num_episodes: int = 50_000,
+) -> tuple[list[list[float]], Policy]:
+    """
+    MC ε-Greedy（Sutton & Barto Algorithm 5.3）:
+      - episode 按当前 π(·|s) 采样动作（概率探索）
+      - 用 Returns/Num 估计 q(s,a)
+      - π(·|s) ← ε-greedy(q, s)
+    未传 policy 时从均匀策略开始。
+    返回 (V, policy)，V(s) = Σ_a π(a|s) q(s,a)。
+    """
+    if not 0.0 < epsilon <= 1.0:
+        raise ValueError("epsilon must be in (0, 1]")
+
+    gamma = env.config.gamma if gamma is None else gamma
+    policy = copy.deepcopy(
+        policy if policy is not None else uniform_policy(env)
+    )
+    n_actions = env.action_space.n
+    q: dict[tuple[tuple[int, int], int], float] = {}
+    gamma = env.config.gamma if gamma is None else gamma
+    policy = copy.deepcopy(
+        policy if policy is not None else uniform_policy(env)
+    )
+    policy_new = copy.deepcopy(
+        policy if policy is not None else uniform_policy(env)
+    )
+    n_actions = env.action_space.n
+    q: dict[tuple[tuple[int, int], int], float] = {}
+    s = (0,0)
+    for _ in range(num_episodes):
+        for _ in range(max_steps):
+            probs = policy.get(s)
+            a = sample_action(probs)
+            next_pos, r, terminated = env.transition(s, a)
+            next_probs = policy.get(next_pos)
+            next_a = sample_action(next_probs)
+            best = float('-inf')
+            best_act = None
+            for a_ in range(n_actions):
+                if q.get((next_pos,a_),float('-inf')) > best:
+                    best = q.get((next_pos,a_))
+                    best_act = a_
+            q[(s,a)] = q.get((s,a),0) - 0.001 * (q.get((s,a),0) - (r + gamma * q.get((next_pos,best_act),0)))
+            policy_new[s] = epsilon_greedy_probs(q,s,n_actions,0)
+            if terminated:
+                break
+            s = next_pos
+
+    n = env.config.rows
+    v = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            st = (i, j)
+            probs = policy_new.get(st, [1.0 / n_actions] * n_actions)
+            v[i][j] = sum(probs[a] * q.get((st, a), 0.0) for a in range(n_actions))
+    return v, policy_new
+
+
+
+
+import torch
+from torch import nn
+from torch.functional import F
+
+class PolicyNet(nn.Module):
+
+    def __init__(self,state_dim,action_dim):
+        super().__init__()
+        layers = [nn.Linear(state_dim,100),nn.ReLU(),nn.Linear(100,action_dim)]
+        self.mlp = nn.Sequential(*layers)
+    
+    # def sample_action(self,state):
+    #     with torch.no_grad():
+    #         probs = self.forward(state) # action_dim
+    #         return sample_action(probs.tolist())
+
+    def forward(self,state):
+        ## state state_dim
+        logits = self.mlp(state) # action_dim
+        probs = F.softmax(logits,dim=-1)
+        return probs
+
+
+
+def calc_rewards(arr,gamma):
+    t = 0
+    ret = []
+    for r in reversed(arr):
+        t = t * gamma + r
+        ret.append(t)
+    ret.reverse()
+    return ret
+
+
+from torch.optim import Adam
+
+def policy_gradient(
+    env: GridWorldEnv,
+    policy: Policy | None = None,
+    *,
+    epsilon: float = 0.1,
+    gamma: float | None = None,
+    max_steps: int = 100,
+    num_episodes: int = 50_000,
+    entropy_coef: float = 0.05,
+) -> tuple[list[list[float]], Policy]:
+    """
+    MC ε-Greedy（Sutton & Barto Algorithm 5.3）:
+      - episode 按当前 π(·|s) 采样动作（概率探索）
+      - 用 Returns/Num 估计 q(s,a)
+      - π(·|s) ← ε-greedy(q, s)
+    未传 policy 时从均匀策略开始。
+    返回 (V, policy)，V(s) = Σ_a π(a|s) q(s,a)。
+    """
+    if not 0.0 < epsilon <= 1.0:
+        raise ValueError("epsilon must be in (0, 1]")
+
+    gamma = env.config.gamma if gamma is None else gamma
+    n_actions = env.action_space.n
+    n = env.config.rows
+    policy1 = PolicyNet(n*n,n_actions)
+    optim = Adam(policy1.parameters(),lr=0.003)
+    goal = env.config.goal_pos
+
+    gamma = env.config.gamma if gamma is None else gamma
+    def make_state(s):
+        vec = [0.0] * (n*n)
+        index = s[0] * n  + s[1]
+        vec[index] = 1.0
+        return torch.tensor(vec)
+    
+
+    for ep in range(num_episodes):
+        s = (0, 0)  # 与 eval 同起点，否则很难学到从 (0,0) 出发
+        traj = []
+        rws = []
+        for _ in range(max_steps):
+            state = make_state(s)
+            probs = policy1(state)
+            a = sample_action(probs.tolist())
+            next_pos, r, terminated = env.transition(s, a)
+            traj.append((s,a,probs[a],r,next_pos))
+            rws.append(r)
+            if terminated or next_pos == goal:
+                break
+            s = next_pos
+        
+        rws = calc_rewards(rws, gamma)
+        # 全 0 回报时减均值会让每一步 advantage 都是 0，策略只往 stay 塌
+        if len(rws) > 1:
+            mean = sum(rws) / len(rws)
+            var = sum((g - mean) ** 2 for g in rws) / len(rws)
+            if var > 1e-12:
+                rws = [g - mean for g in rws]
+
+        loss = 0
+        for i in range(len(traj)):
+            s,a,prob,_,next_pos = traj[i]
+            r  = rws[i]
+            loss += (-prob.log() * r)
+            p = policy1(make_state(s))
+            loss -= entropy_coef * (-(p * p.log()).sum())
+        
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+        ## eval
+        if ep % 100 == 0:
+            rs = 0
+            count = 0
+            s = (0, 0)
+            path_steps: list[str] = [f"{s}"]
+            for _ in range(max_steps):
+                state = make_state(s)
+                probs = policy1(state)
+                # a = sample_action(probs.tolist())
+                a = torch.argmax(probs, dim=-1).item()
+                next_pos, r, terminated = env.transition(s, a)
+                rs += r
+                count += 1
+                path_steps.append(
+                    f"{action_name(env, a)}->{next_pos}(r={r:g})"
+                )
+                if terminated or next_pos == goal:
+                    break
+                s = next_pos
+            shown = path_steps[:10]
+            tail = "..." if len(path_steps) > 10 else ""
+            print("eval", ep, f"G_0={rs:.3f}", "->".join(shown) + tail)
+    
+
+    def mc_return_from(s_start: tuple[int, int]) -> float:
+        """从 s_start 出发按 π 采样一条轨迹，返回 G_0。"""
+        s = s_start
+        rewards: list[float] = []
+        with torch.no_grad():
+            for _ in range(max_steps):
+                probs = policy1(make_state(s))
+                a = sample_action(probs.tolist())
+                next_pos, r, terminated = env.transition(s, a)
+                rewards.append(r)
+                if terminated:
+                    break
+                s = next_pos
+        if not rewards:
+            return 0.0
+        return calc_rewards(rewards, gamma)[0]
+
+    value_rollouts = 100
+    policy1.eval()
+    n = env.config.rows
+    v = [[0.0] * n for _ in range(n)]
+    policy_table: Policy = {}
+    with torch.no_grad():
+        for i in range(n):
+            for j in range(n):
+                s = (i, j)
+                v[i][j] = sum(
+                    mc_return_from(s) for _ in range(value_rollouts)
+                ) / value_rollouts
+                policy_table[s] = policy1(make_state(s)).tolist()
+    return v, policy_table
+
+            
+
+
+
+
+
+
+
 def action_name(env: GridWorldEnv, action: int) -> str:
     return env.action_meanings[action]
 
@@ -578,6 +818,6 @@ if __name__ == "__main__":
     print("=== 初始策略（均匀）===")
     print_policy(env, policy)
 
-    v, policy = qleaning_offpolicy(env, policy, epsilon=0.1, num_episodes=50_000)
-    print_values(env, v, title="\nV（MC ε-greedy, V=Σ π(a|s)q）:")
+    v, policy = policy_gradient(env, policy, epsilon=0.1, num_episodes=50_00000)
+    print_values(env, v, title="\nV（MC 估计 V^π，按 π 采样 rollout）:")
     print_policy(env, policy)

@@ -111,7 +111,7 @@ def compute_reward_and_next(
     boundary_reward: float = -1.0,
     orange_reward: float = -1.0,
     goal_reward: float = 1.0,
-    step_reward: float = 0.0,
+    step_reward: float = -0.1,
 ) -> tuple[float, tuple[int, int]]:
     """返回 (reward, next_pos)。"""
     nr, nc = pos[0] + delta[0], pos[1] + delta[1]
