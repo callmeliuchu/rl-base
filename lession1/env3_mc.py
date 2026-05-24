@@ -20,7 +20,7 @@ import copy
 import random
 from typing import TYPE_CHECKING
 
-from env3 import GAMMA, GridWorldEnv, make_env
+from env3 import GAMMA, GridWorldEnv, make_env, make_pg_env
 
 if TYPE_CHECKING:
     pass
@@ -645,7 +645,6 @@ def policy_gradient(
     gamma: float | None = None,
     max_steps: int = 100,
     num_episodes: int = 50_000,
-    entropy_coef: float = 0.05,
 ) -> tuple[list[list[float]], Policy]:
     """
     MC ε-Greedy（Sutton & Barto Algorithm 5.3）:
@@ -690,19 +689,17 @@ def policy_gradient(
         
         rws = calc_rewards(rws, gamma)
         # 全 0 回报时减均值会让每一步 advantage 都是 0，策略只往 stay 塌
-        if len(rws) > 1:
-            mean = sum(rws) / len(rws)
-            var = sum((g - mean) ** 2 for g in rws) / len(rws)
-            if var > 1e-12:
-                rws = [g - mean for g in rws]
+        # if len(rws) > 1:
+        #     mean = sum(rws) / len(rws)
+        #     var = sum((g - mean) ** 2 for g in rws) / len(rws)
+        #     if var > 1e-12:
+        #         rws = [g - mean for g in rws]
 
         loss = 0
         for i in range(len(traj)):
             s,a,prob,_,next_pos = traj[i]
             r  = rws[i]
             loss += (-prob.log() * r)
-            p = policy1(make_state(s))
-            loss -= entropy_coef * (-(p * p.log()).sum())
         
         optim.zero_grad()
         loss.backward()
@@ -812,12 +809,12 @@ def print_policy(env: GridWorldEnv, policy: Policy) -> None:
 
 
 if __name__ == "__main__":
-    env = make_env()
+    env = make_pg_env()
     policy = uniform_policy(env)
 
     print("=== 初始策略（均匀）===")
     print_policy(env, policy)
 
-    v, policy = policy_gradient(env, policy, epsilon=0.1, num_episodes=50_00000)
+    v, policy = policy_gradient(env, policy, epsilon=0.1, num_episodes=50000)
     print_values(env, v, title="\nV（MC 估计 V^π，按 π 采样 rollout）:")
     print_policy(env, policy)

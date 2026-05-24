@@ -327,6 +327,19 @@ def make_env(**kwargs) -> GridWorldEnv:
     return GridWorldEnv(**kwargs)
 
 
+def make_pg_env(**kwargs) -> GridWorldEnv:
+    """
+    纯 policy gradient 的最小可工作改动：
+      - 放大目标奖励
+      - 将橙色格惩罚从 -10 调回 -1
+    """
+    config = EnvConfig(
+        goal_reward=10.0,
+        orange_reward=-1.0,
+    )
+    return GridWorldEnv(config=config, **kwargs)
+
+
 if __name__ == "__main__":
     env = make_env(render_mode="human")
     obs, info = env.reset(seed=42)
