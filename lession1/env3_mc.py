@@ -625,6 +625,7 @@ class PolicyNet(nn.Module):
 
 
 
+
 def calc_rewards(arr,gamma):
     t = 0
     ret = []
@@ -769,9 +770,254 @@ def policy_gradient(
             
 
 
+class CriticNet(nn.Module):
+
+    def __init__(self,state_dim,action_dim):
+        super().__init__()
+        layers = [nn.Linear(state_dim+action_dim,100),nn.ReLU(),nn.Linear(100,1)]
+        self.mlp = nn.Sequential(*layers)
+    
+
+    def forward(self,state,action):
+        ## state state_dim
+        merge = torch.concat([state,action],dim=-1)
+        values = self.mlp(merge) # action_dim
+        return values
 
 
 
+def qac(
+    env: GridWorldEnv,
+    policy: Policy | None = None,
+    *,
+    epsilon: float = 0.1,
+    gamma: float | None = None,
+    max_steps: int = 100,
+    num_episodes: int = 50_000,
+) -> tuple[list[list[float]], Policy]:
+    """
+    MC ε-Greedy（Sutton & Barto Algorithm 5.3）:
+      - episode 按当前 π(·|s) 采样动作（概率探索）
+      - 用 Returns/Num 估计 q(s,a)
+      - π(·|s) ← ε-greedy(q, s)
+    未传 policy 时从均匀策略开始。
+    返回 (V, policy)，V(s) = Σ_a π(a|s) q(s,a)。
+    """
+    if not 0.0 < epsilon <= 1.0:
+        raise ValueError("epsilon must be in (0, 1]")
+
+    gamma = env.config.gamma if gamma is None else gamma
+    n_actions = env.action_space.n
+    n = env.config.rows
+    policy1 = PolicyNet(n*n,n_actions)
+    critic = CriticNet(n*n,n_actions)
+    optim = Adam(policy1.parameters(),lr=0.003)
+    critic_optim = Adam(critic.parameters(),lr=0.003)
+    goal = env.config.goal_pos
+
+    gamma = env.config.gamma if gamma is None else gamma
+    def make_state(s):
+        vec = [0.0] * (n*n)
+        index = s[0] * n  + s[1]
+        vec[index] = 1.0
+        return torch.tensor(vec)
+    
+    def make_action(action):
+        vec = [0.0] * n_actions
+        vec[action] = 1.0
+        return torch.tensor(vec)
+    
+
+    for ep in range(num_episodes):
+        s = (random.randint(0,n-1), random.randint(0,n-1))  # 与 eval 同起点，否则很难学到从 (0,0) 出发
+        state = make_state(s)
+        probs = policy1(state)
+        a = sample_action(probs.tolist())
+        next_pos, r, terminated = env.transition(s, a)
+        next_pos = make_state(next_pos)
+        next_probs = policy1(next_pos)
+        next_action = sample_action(next_probs.tolist())
+        next_action = make_action(next_action)
+        with torch.no_grad():
+            qsa = critic(state,make_action(a))
+            td = qsa - (r + gamma * critic(next_pos,next_action))
+        
+        loss = -qsa * probs[a].log()
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+        critic_loss = td * critic(state,make_action(a))
+        critic_optim.zero_grad()
+        critic_loss.backward()
+        critic_optim.step()
+
+  
+
+        ## eval
+        if ep % 100 == 0:
+            print('loss',loss,critic_loss)
+            rs = 0
+            count = 0
+            s = (0, 0)
+            path_steps: list[str] = [f"{s}"]
+            for _ in range(max_steps):
+                state = make_state(s)
+                probs = policy1(state)
+                # a = sample_action(probs.tolist())
+                a = torch.argmax(probs, dim=-1).item()
+                next_pos, r, terminated = env.transition(s, a)
+                rs += r
+                count += 1
+                path_steps.append(
+                    f"{action_name(env, a)}->{next_pos}(r={r:g})"
+                )
+                if terminated or next_pos == goal:
+                    break
+                s = next_pos
+            shown = path_steps[:10]
+            tail = "..." if len(path_steps) > 10 else ""
+            print("eval", ep, f"G_0={rs:.3f}", "->".join(shown) + tail)
+    
+
+    policy1.eval()
+    critic.eval()
+    v = [[0.0] * n for _ in range(n)]
+    policy_table: Policy = {}
+    with torch.no_grad():
+        for i in range(n):
+            for j in range(n):
+                s = (i, j)
+                state = make_state(s)
+                probs = policy1(state)
+                v[i][j] = sum(
+                    probs[a].item() * critic(state, make_action(a)).item()
+                    for a in range(n_actions)
+                )
+                policy_table[s] = probs.tolist()
+    return v, policy_table
+
+
+
+
+class ValueNet(nn.Module):
+
+    def __init__(self,state_dim):
+        super().__init__()
+        layers = [nn.Linear(state_dim,100),nn.ReLU(),nn.Linear(100,1)]
+        self.mlp = nn.Sequential(*layers)
+    
+
+    def forward(self,state):
+        ## state state_dim
+        values = self.mlp(state) # action_dim
+        return values
+
+
+def a2c(
+    env: GridWorldEnv,
+    policy: Policy | None = None,
+    *,
+    epsilon: float = 0.1,
+    gamma: float | None = None,
+    max_steps: int = 100,
+    num_episodes: int = 50_000,
+) -> tuple[list[list[float]], Policy]:
+    """
+    MC ε-Greedy（Sutton & Barto Algorithm 5.3）:
+      - episode 按当前 π(·|s) 采样动作（概率探索）
+      - 用 Returns/Num 估计 q(s,a)
+      - π(·|s) ← ε-greedy(q, s)
+    未传 policy 时从均匀策略开始。
+    返回 (V, policy)，V(s) = Σ_a π(a|s) q(s,a)。
+    """
+    if not 0.0 < epsilon <= 1.0:
+        raise ValueError("epsilon must be in (0, 1]")
+
+    gamma = env.config.gamma if gamma is None else gamma
+    n_actions = env.action_space.n
+    n = env.config.rows
+    policy1 = PolicyNet(n*n,n_actions)
+    critic = ValueNet(n*n)
+    optim = Adam(policy1.parameters(),lr=0.003)
+    critic_optim = Adam(critic.parameters(),lr=0.003)
+    goal = env.config.goal_pos
+
+    gamma = env.config.gamma if gamma is None else gamma
+    def make_state(s):
+        vec = [0.0] * (n*n)
+        index = s[0] * n  + s[1]
+        vec[index] = 1.0
+        return torch.tensor(vec)
+    
+
+    for ep in range(num_episodes):
+        s = (random.randint(0,n-1), random.randint(0,n-1))  # 与 eval 同起点，否则很难学到从 (0,0) 出发
+
+        state = make_state(s)
+        probs = policy1(state)
+        a = sample_action(probs.tolist())
+        next_pos, r, terminated = env.transition(s, a)
+        next_pos1 = make_state(next_pos)
+
+        with torch.no_grad():
+            v = critic(state)
+            td = v - (r + gamma * critic(next_pos1))
+        
+        loss = td * probs[a].log()
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+        critic_loss = td * critic(state)
+        critic_optim.zero_grad()
+        critic_loss.backward()
+        critic_optim.step()
+        s = next_pos
+
+
+
+  
+
+        ## eval
+        if ep % 100 == 0:
+            # print('loss',loss,critic_loss)
+            rs = 0
+            count = 0
+            s = (0, 0)
+            path_steps: list[str] = [f"{s}"]
+            for _ in range(max_steps):
+                state = make_state(s)
+                probs = policy1(state)
+                # a = sample_action(probs.tolist())
+                a = torch.argmax(probs, dim=-1).item()
+                next_pos, r, terminated = env.transition(s, a)
+                rs += r
+                count += 1
+                path_steps.append(
+                    f"{action_name(env, a)}->{next_pos}(r={r:g})"
+                )
+                if terminated or next_pos == goal:
+                    break
+                s = next_pos
+            shown = path_steps[:10]
+            tail = "..." if len(path_steps) > 10 else ""
+            print("eval", ep, f"G_0={rs:.3f}", "->".join(shown) + tail)
+    
+
+    policy1.eval()
+    critic.eval()
+    v = [[0.0] * n for _ in range(n)]
+    policy_table: Policy = {}
+    with torch.no_grad():
+        for i in range(n):
+            for j in range(n):
+                s = (i, j)
+                state = make_state(s)
+                probs = policy1(state)
+                v[i][j] = critic(state).item()
+                policy_table[s] = probs.tolist()
+    return v, policy_table
 
 
 def action_name(env: GridWorldEnv, action: int) -> str:
@@ -813,12 +1059,12 @@ def print_policy(env: GridWorldEnv, policy: Policy) -> None:
 
 
 if __name__ == "__main__":
-    env = make_pg_env()
+    env = make_env()
     policy = uniform_policy(env)
 
     print("=== 初始策略（均匀）===")
     print_policy(env, policy)
 
-    v, policy = policy_gradient(env, policy, epsilon=0.1, num_episodes=50000)
+    v, policy = a2c(env, policy, epsilon=0.1, num_episodes=90000)
     print_values(env, v, title="\nV（MC 估计 V^π，按 π 采样 rollout）:")
     print_policy(env, policy)
