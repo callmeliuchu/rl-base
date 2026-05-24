@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import random
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from env3 import GAMMA, GridWorldEnv, make_env, make_pg_env
@@ -299,12 +300,11 @@ def mc_policy_iteration3(
     num_episodes: int = 50_000,
 ) -> tuple[list[list[float]], Policy]:
     """
-    MC ε-Greedy（Sutton & Barto Algorithm 5.3）:
-      - episode 按当前 π(·|s) 采样动作（概率探索）
-      - 用 Returns/Num 估计 q(s,a)
-      - π(·|s) ← ε-greedy(q, s)
-    未传 policy 时从均匀策略开始。
-    返回 (V, policy)，V(s) = Σ_a π(a|s) q(s,a)。
+    REINFORCE with a minimal state baseline:
+      - episode 按当前 π(·|s) 采样动作
+      - 用状态历史回报的运行平均作为 baseline b(s)
+      - 用 advantage = G_t - b(s_t) 更新策略
+    未传 policy 时从均匀策略开始。返回 (V, policy)。
     """
     if not 0.0 < epsilon <= 1.0:
         raise ValueError("epsilon must be in (0, 1]")
@@ -663,6 +663,8 @@ def policy_gradient(
     policy1 = PolicyNet(n*n,n_actions)
     optim = Adam(policy1.parameters(),lr=0.003)
     goal = env.config.goal_pos
+    baseline_sum: dict[tuple[int, int], float] = defaultdict(float)
+    baseline_count: dict[tuple[int, int], int] = defaultdict(int)
 
     gamma = env.config.gamma if gamma is None else gamma
     def make_state(s):
@@ -687,23 +689,25 @@ def policy_gradient(
                 break
             s = next_pos
         
-        rws = calc_rewards(rws, gamma)
-        # 全 0 回报时减均值会让每一步 advantage 都是 0，策略只往 stay 塌
-        # if len(rws) > 1:
-        #     mean = sum(rws) / len(rws)
-        #     var = sum((g - mean) ** 2 for g in rws) / len(rws)
-        #     if var > 1e-12:
-        #         rws = [g - mean for g in rws]
+        returns = calc_rewards(rws, gamma)
 
         loss = 0
         for i in range(len(traj)):
             s,a,prob,_,next_pos = traj[i]
-            r  = rws[i]
-            loss += (-prob.log() * r)
+            g = returns[i]
+            count = baseline_count[s]
+            baseline = baseline_sum[s] / count if count > 0 else 0.0
+            advantage = g - baseline
+            loss += (-prob.log() * advantage)
         
         optim.zero_grad()
         loss.backward()
         optim.step()
+
+        for i in range(len(traj)):
+            s, _, _, _, _ = traj[i]
+            baseline_sum[s] += returns[i]
+            baseline_count[s] += 1
 
         ## eval
         if ep % 100 == 0:
